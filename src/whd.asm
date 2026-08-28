@@ -1717,6 +1717,11 @@ whd_bootstrap:
 	pea	cdaudio_status(pc)
 	move.l	(a7)+,($20,A2)	; status but reserved
 	lea	($C,A2),A3			; base
+
+	TSTVAR_B	realcd32_flag
+	beq.b	.no_toc_cache
+	bsr	cdaudio_cache_toc
+.no_toc_cache
 	
 	move.w	#$18,D1		; $24-$C: init offset
 	moveq.l	#0,d0
@@ -2060,9 +2065,11 @@ handle_6C:
 	; timeout: reset
 	beq	_reset
 .notimeout
-	IFEQ	1
-	TSTVAR_W	cd_track_loop
+	IFNE	1
+	TSTVAR_B	realcd32_flag
 	beq.b	.no_need_to_play
+	TSTVAR_B	cdio_in_progress
+	bne.b	.no_need_to_play
 	bsr	cdaudio_replay_track
 .no_need_to_play
 	ENDC

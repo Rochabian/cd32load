@@ -15,6 +15,10 @@
 ; a constant level 2 interrupt is triggered and it results in a lock-up
 ;;SAVE_RESTORE_BUG
 
+CDAUDIO_ASYNC_BYTES_PER_TICK = 4
+CDAUDIO_ASYNC_NEXT_NONE = 0
+CDAUDIO_ASYNC_NEXT_UNPAUSE = 1
+
 cd_audio_test
 	movem.l	d0-A6,-(a7)
 	lea $dff000,a6
@@ -208,6 +212,7 @@ cdaudio_monitor_play_blocking:
 cdaudio_stop:
 	movem.l	d0-A6,-(a7)
 	SET_VAR_CONTEXT
+	bsr	cdaudio_async_reset
 	TSTVAR_W	cd_track_playing
 	beq.b	.out		; if track is not playing, stopping can block
 
@@ -240,8 +245,17 @@ cdaudio_stop:
 	
 ; test if track playing. If it doesn't, replay it
 cdaudio_replay_track:
-	movem.l	d0-d1/a4,-(A7)
+	movem.l	d0-A6,-(A7)
 	SET_VAR_CONTEXT
+	TSTVAR_B	realcd32_flag
+	beq.b	.no_need_to_play
+	TSTVAR_B	cdio_in_progress
+	bne.b	.no_need_to_play
+	bsr	cdaudio_service_async
+	tst.b	cdaudio_async_cmd_len(pc)
+	bne.b	.no_need_to_play
+	TSTVAR_W	cd_track_loop
+	beq.b	.no_need_to_play
 	; check if CD track is playing. If it does, check if looped
 	GETVAR_W	cd_track_playing,d1
 	beq.b	.no_need_to_play
@@ -252,15 +266,197 @@ cdaudio_replay_track:
 	moveq.l	#0,d0
 	move.w	d1,d0
 	moveq.l	#0,d1
-	bsr	cdaudio_play_track
+	bsr	cdaudio_prepare_async_play
+	bsr	cdaudio_service_async
 .no_need_to_play
-	movem.l	(a7)+,d0-d1/a4
+	movem.l	(a7)+,d0-A6
 	rts
-	
+
+; Prepare a PLAY+UNPAUSE sequence for the current track without busy-waiting.
+; D0: track number. TOC must already be available from an earlier blocking play.
+cdaudio_prepare_async_play:
+	move.l	d0,d6
+	tst.w	toc_done
+	beq.w	.play_error
+
+	lea	$dff000,a6
+	move.w	#$c008,$9a(a6)
+	bset	#0,$bfe001
+
+	lea	$b80000,a5
+	move.l	#$20000000,8(a5)
+	and.l	#$11800000,$24(a5)
+
+	move.l	d6,d0
+	cmp.b	toc_total(pc),d0
+	bcc.w	.play_error
+	subq.w	#1,d0
+	bmi.w	.play_error
+	lsl.w	#2,d0
+	lea	toc_data(pc),a1
+	add.w	d0,a1
+	move.b	(a1)+,d0
+	btst	#6,d0	; data track?
+	bne.w	.play_error
+	lea	cmd_play+1(pc),a0
+	; start
+	move.b	(a1)+,(a0)+ ;M
+	move.b	(a1)+,(a0)+ ;S
+	move.b	(a1)+,(a0)+ ;F
+	addq.l	#1,a1
+	; end
+	move.b	(a1)+,(a0)+ ;M
+	move.b	(a1)+,(a0)+ ;S
+	move.b	(a1)+,(a0) ;F
+
+	lea	play_status(pc),a0
+	clr.w	(a0)
+	lea	playing_status(pc),a0
+	clr.b	(a0)		; avoid queueing another play while PLAY starts
+	lea	cmd_play(pc),a0
+	moveq	#CDAUDIO_ASYNC_NEXT_UNPAUSE,d0
+	bsr	cdaudio_async_start_cmd
+	SETVAR_W	d6,cd_track_playing
+.play_error:
+	rts
+
+cdaudio_async_reset:
+	lea	cdaudio_async_cmd_len(pc),a0
+	clr.b	(a0)
+	lea	cdaudio_async_cmd_pos(pc),a0
+	clr.b	(a0)
+	lea	cdaudio_async_cmd_next(pc),a0
+	clr.b	(a0)
+	rts
+
+; Read and cache the CD TOC before the game starts. This keeps the first
+; in-game cdaudio_play_track call on the non-blocking path.
+cdaudio_cache_toc:
+	movem.l	d0-A6,-(a7)
+	SET_VAR_CONTEXT
+	TSTVAR_B	realcd32_flag
+	beq.b	.out
+	tst.w	toc_done
+	bne.b	.out
+
+	lea	$dff000,a6
+	move.w	#$c008,$9a(a6)
+	lea	$b80000,a5
+	move.l	#$20000000,8(a5)
+	and.l	#$11800000,$24(a5)
+
+	; CD command index counter for blocking commands.
+	moveq	#0,d7
+
+	; flush possible half-transmitted command, 12 bytes is max command length.
+	moveq	#12/2+1-1,d4
+.flushit
+	lea	cmd_led_off(pc),a0
+	bsr.w	sendcmd
+	lea	cmd_led_on(pc),a0
+	bsr.w	sendcmd
+	dbf	d4,.flushit
+
+	lea	cmd_toc(pc),a0
+	bsr.w	sendcmd
+.waittoc
+	move.b	toc_total(pc),d0
+	beq.s	.waittoc
+	cmp.b	toc_found(pc),d0
+	bne.s	.waittoc
+	st	toc_done
+.out
+	movem.l	(a7)+,d0-A6
+	rts
+
+; A0: command packet template
+; D0.B: next async stage
+cdaudio_async_start_cmd:
+	move.b	d0,d5
+	moveq	#0,d3
+	move.b	(a0),d3
+	move.b	cmd_lengths(pc,d3.w),d3
+	beq.b	.invalid
+	move.w	d3,d4
+	addq.w	#1,d4	; include checksum byte
+
+	lea	cdaudio_async_cmd_buffer(pc),a1
+	lea	cdaudio_async_cmd_index(pc),a2
+	addq.b	#1,(a2)
+	and.b	#15,(a2)
+	bne.b	.index_ok
+	move.b	#1,(a2)
+.index_ok
+	move.b	(a2),d1
+	lsl.b	#4,d1
+	move.b	(a0)+,d0
+	or.b	d1,d0
+	moveq	#-1,d2
+	sub.b	d0,d2
+	move.b	d0,(a1)+
+	subq.w	#1,d3
+.copy_loop
+	tst.w	d3
+	beq.b	.checksum
+	move.b	(a0)+,d0
+	sub.b	d0,d2
+	move.b	d0,(a1)+
+	subq.w	#1,d3
+	bra.b	.copy_loop
+.checksum
+	move.b	d2,(a1)+
+	lea	cdaudio_async_cmd_pos(pc),a0
+	clr.b	(a0)
+	lea	cdaudio_async_cmd_next(pc),a0
+	move.b	d5,(a0)
+	lea	cdaudio_async_cmd_len(pc),a0
+	move.b	d4,(a0)
+.invalid
+	rts
+
+cdaudio_service_async:
+	moveq	#CDAUDIO_ASYNC_BYTES_PER_TICK-1,d3
+.service_loop
+	lea	cdaudio_async_cmd_len(pc),a0
+	moveq	#0,d0
+	move.b	(a0),d0
+	beq.b	.out
+	lea	$b80000,a5
+	move.l	4(a5),d1
+	btst	#30,d1
+	beq.b	.out
+	lea	cdaudio_async_cmd_pos(pc),a1
+	moveq	#0,d1
+	move.b	(a1),d1
+	lea	cdaudio_async_cmd_buffer(pc),a2
+	move.b	(a2,d1.w),d2
+	move.b	d2,$28(a5)
+	addq.b	#1,(a1)
+	moveq	#0,d1
+	move.b	(a1),d1
+	cmp.b	d0,d1
+	bcs.b	.next_byte
+	clr.b	(a0)
+	clr.b	(a1)
+	lea	cdaudio_async_cmd_next(pc),a0
+	move.b	(a0),d0
+	clr.b	(a0)
+	cmp.b	#CDAUDIO_ASYNC_NEXT_UNPAUSE,d0
+	bne.b	.next_byte
+	lea	cmd_unpause(pc),a0
+	moveq	#CDAUDIO_ASYNC_NEXT_NONE,d0
+	bsr	cdaudio_async_start_cmd
+	bra.b	.out
+.next_byte
+	dbf	d3,.service_loop
+.out
+	rts
+
 ; D0: track number
 ; D1: flags (0: loop play, 1: single play for now)
 cdaudio_play_track:
 	movem.l	d0-A6,-(a7)
+	bsr	cdaudio_async_reset
 	; enable level 2 interrupt
 	lea $dff000,a6
 	move.w #$c008,$9a(a6)
@@ -277,11 +473,21 @@ cdaudio_play_track:
 	
 	move.l	d0,d6		; track number
 	SET_VAR_CONTEXT
-	
-	not.w	d1	; 0 becomes all ones: 0 means loop
+
+	tst.w	d1
+	seq	d1
+	ext.w	d1	; 0 becomes all ones: 0 means loop
 	CLRVAR_W	cd_track_playing
 	SETVAR_W	d1,cd_track_loop
-	
+
+	tst.w	toc_done
+	beq.b	.need_blocking_play
+	move.l	d6,d0
+	bsr	cdaudio_prepare_async_play
+	bsr	cdaudio_service_async
+	bra	play_error
+.need_blocking_play
+
 	lea $b80000,a5
 	;enable only pio receive interrupt
 	move.l #$20000000,8(a5)		; intena
@@ -740,3 +946,15 @@ statusout
 	dcb.b 48,0
 	ENDC
 statusoutend
+
+cdaudio_async_cmd_len
+	dc.b	0
+cdaudio_async_cmd_pos
+	dc.b	0
+cdaudio_async_cmd_next
+	dc.b	0
+cdaudio_async_cmd_index
+	dc.b	0
+cdaudio_async_cmd_buffer
+	dcb.b	14,0	; 12 command bytes + checksum + slop
+	even
