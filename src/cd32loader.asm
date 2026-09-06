@@ -65,6 +65,18 @@ CDL_0001:
 	; set AKIKO dma & intena (added by JOTD), same values as ROM
 	move.l	#$10000000,AKIKO_INTENA_OFFSET(A3)
 	bsr	activate_akiko_dma
+
+	IFD	CDAUDIO_LOADER_SOFT_REINIT
+	CMPI.W	#CD_SOFTREINIT,D3
+	BNE.B	.not_soft_reinit
+	TST.L	20(A4)
+	BEQ.B	.soft_reinit_done
+	BSR.W	CDL_005A
+.soft_reinit_done
+	MOVEQ	#0,D0
+	BRA.S	.out
+.not_soft_reinit
+	ENDC
 	
 	MOVEQ	#CDLERR_NOCMD,D0			;05c: 70ff
 	CMPI.W	#$0008,D3		;05e: 0c430008
