@@ -1,6 +1,7 @@
 ; ugly and experimental PIO mode CD32 CD audio player example
 ; by Toni Wilen
 ; converted to fully relocatable code by JOTD
+; fixes by Rochabian
 ;
 	;;include struct.i
 	
