@@ -64,6 +64,8 @@
  EITEM	CD_READFILE
  EITEM	CD_READFILEOFFSET
 
+CD_SOFTREINIT	equ 8		; internal command, not part of the slave API
+
 ;----------------------------------------------
 ;CD_DRIVEINIT				;init the CD drive
 ; IN:	D1 = CDREADSPEEDX1 or CDREADSPEEDX2

@@ -1,6 +1,7 @@
 ; ugly and experimental PIO mode CD32 CD audio player example
 ; by Toni Wilen
 ; converted to fully relocatable code by JOTD
+; fixes by Rochabian
 ;
 	;;include struct.i
 	
@@ -212,6 +213,12 @@ cdaudio_monitor_play_blocking:
 cdaudio_stop:
 	movem.l	d0-A6,-(a7)
 	SET_VAR_CONTEXT
+	; During data reads, mute before touching the async queue/Pause command.
+	; If a loop replay was just armed, this prevents a short audible CDDA leak.
+	TSTVAR_B	cdio_in_progress
+	beq.b	.no_data_mute
+	bclr #0,$bfe001
+.no_data_mute
 	bsr	cdaudio_async_reset
 	TSTVAR_W	cd_track_playing
 	beq.b	.out		; if track is not playing, stopping can block
@@ -224,6 +231,11 @@ cdaudio_stop:
 	lea AKIKO_BASE,a5
 	lea cmd_pause(pc),a0
 	bsr.w sendcmd
+
+	IFD	CDAUDIO_SOFT_REINIT_AFTER_CDDA
+	lea	cdaudio_reinit_after_cdda_needed(pc),a0
+	st.b	(a0)
+	ENDC
 
 	lea cmd_led_off(pc),a0
 	bsr.w sendcmd
@@ -957,4 +969,10 @@ cdaudio_async_cmd_index
 	dc.b	0
 cdaudio_async_cmd_buffer
 	dcb.b	14,0	; 12 command bytes + checksum + slop
+	IFD	CDAUDIO_SOFT_REINIT_AFTER_CDDA
+cdaudio_reinit_after_cdda_needed
+	dc.b	0
+cdaudio_reinit_after_cdda_busy
+	dc.b	0
+	ENDC
 	even
