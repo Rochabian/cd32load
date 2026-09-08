@@ -1,6 +1,7 @@
 ; ugly and experimental PIO mode CD32 CD audio player example
 ; by Toni Wilen
 ; converted to fully relocatable code by JOTD
+; fixes by Rochabian
 ;
 	;;include struct.i
 	
@@ -14,6 +15,10 @@
 ; it works on WinUAE, but on the real machine, when restoring previous state
 ; a constant level 2 interrupt is triggered and it results in a lock-up
 ;;SAVE_RESTORE_BUG
+
+CDAUDIO_ASYNC_BYTES_PER_TICK = 4
+CDAUDIO_ASYNC_NEXT_NONE = 0
+CDAUDIO_ASYNC_NEXT_UNPAUSE = 1
 
 CDAUDIO_ASYNC_BYTES_PER_TICK = 4
 CDAUDIO_ASYNC_NEXT_NONE = 0
